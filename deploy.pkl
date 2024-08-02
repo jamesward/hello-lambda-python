@@ -1,0 +1,285 @@
+amends "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/template.pkl"
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/cloudformation.pkl" as cfn
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/cloudformation/customresource.pkl" as customresource
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/iam/role.pkl" as role
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/s3/bucket.pkl" as bucket
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ecr/repository.pkl" as ecrRepository
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/codebuild/project.pkl" as codebuildProject
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/codepipeline/pipeline.pkl" as codepipelinePipeline
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ec2/subnet.pkl" as ec2Subnet
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ec2/vpc.pkl" as ec2Vpc
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ec2/securitygroup.pkl" as ec2SecurityGroup
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ecs/cluster.pkl" as ecsCluster
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ecs/taskdefinition.pkl" as ecsTaskDefinition
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/ecs/service.pkl" as ecsService
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/elasticloadbalancingv2/loadbalancer.pkl" as elbLoadBalancer
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/elasticloadbalancingv2/targetgroup.pkl" as elbTargetGroup
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/elasticloadbalancingv2/listener.pkl" as elbListener
+//import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/lambda/function.pkl" as lambdaFunction
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/codestarconnections/connection.pkl" as codestarconnectionsConnection
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/applicationautoscaling/scalabletarget.pkl" as applicationautoscalingScalabletarget
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/applicationautoscaling/scalingpolicy.pkl" as applicationautoscalingScalingpolicy
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/logs/loggroup.pkl" as logsLoggroup
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/lambda/layerversion.pkl" as lambda_layerversion
+import "package://pkg.pkl-lang.org/github.com/aws-cloudformation/cloudformation-pkl/cloudformation@0.1.3#/aws/lambda/function.pkl" as lambda_function
+
+
+Resources {
+  ["ArtifactBucket"] = new bucket.Bucket {
+
+  }
+
+  ["FunctionRole"] = new role.Role {
+    AssumeRolePolicyDocument {
+      Version = "2012-10-17"
+      Statement {
+        Effect = "Allow"
+        Principal {
+          Service = "lambda.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    }
+    ManagedPolicyArns {
+      "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+    }
+  }
+
+  ["Function"] = new lambda_function.Function {
+    Code {
+      ZipFile = cfn.Sub("""
+        import cfnresponse
+        import boto3
+
+        def handler(event, context):
+          cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+        """)
+    }
+    Runtime = "python3.12"
+    Handler = "index.handler"
+    Role = cfn.GetAtt("InitFunctionRole", "Arn")
+  }
+
+
+  ["CodeBuildRole"] = new role.Role {
+    AssumeRolePolicyDocument {
+      Version = "2012-10-17"
+      Statement {
+        Effect = "Allow"
+        Principal {
+          Service = "codebuild.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    }
+    ManagedPolicyArns {
+      "arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess"
+      //             "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+      //             "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
+    }
+    Policies {
+      new {
+        PolicyName = "CodeBuildLogsAndArtifacts"
+        PolicyDocument {
+          Version = "2012-10-17"
+          Statement = new Listing {
+            new {
+              Effect = "Allow"
+              Action = new Listing {
+                "logs:CreateLogGroup"
+                "logs:CreateLogStream"
+                "logs:PutLogEvents"
+              }
+              Resource = new Listing {
+                cfn.Sub("arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*") // todo: can we reference the specific log-stream without a circular reference?
+              }
+            }
+            new {
+              Effect = "Allow"
+              Action = new Listing {
+                "s3:GetObject"
+                "s3:PutObject"
+              }
+              Resource = new Listing {
+                cfn.Sub("${ArtifactBucket.Arn}/*")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  ["CodeBuildProject"] = new codebuildProject.Project {
+    Artifacts {
+      Type = "CODEPIPELINE" // to enum?
+    }
+    Environment {
+      ComputeType = "BUILD_GENERAL1_SMALL"
+      Image = "aws/codebuild/standard:5.0"
+      Type = "LINUX_CONTAINER"
+      EnvironmentVariables {
+        new {
+          Name = "AWS_ACCOUNT_ID"
+          Value = cfn.Ref("AWS::AccountId")
+        }
+        new {
+          Name = "AWS_REGION"
+          Value = cfn.Ref("AWS::Region")
+        }
+        new {
+          Name = "STACK_NAME"
+          Value = cfn.Ref("AWS::StackName")
+        }
+      }
+    }
+    ServiceRole = cfn.GetAtt("CodeBuildRole", "Arn")
+    Source {
+      Type = "CODEPIPELINE"
+    }
+  }
+
+  ["CodePipelineRole"] = new role.Role {
+    AssumeRolePolicyDocument {
+      Version = "2012-10-17"
+      Statement {
+        Effect = "Allow"
+        Principal {
+          Service = "codepipeline.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    }
+    ManagedPolicyArns {
+      "arn:aws:iam::aws:policy/AWSLambdaExecutionRole"
+    }
+    //     Policies {
+    //       new {
+    //         PolicyName = "CodePipelinePolicy"
+    //         PolicyDocument {
+    //           Version = "2012-10-17"
+    //           Statement = new Listing {
+    //             new {
+    //               Effect = "Allow"
+    //               Action = new Listing {
+    //                 "s3:GetObject"
+    //                 "s3:GetObjectVersion"
+    //                 "s3:GetBucketVersioning"
+    //                 "s3:PutObject"
+    //               }
+    //               Resource = new Listing {
+    //                 cfn.GetAtt("ArtifactBucket", "Arn")
+    //                 cfn.Sub("${ArtifactBucket.Arn}/*")
+    //               }
+    //             }
+    //             new {
+    //               Effect = "Allow"
+    //               Action = new Listing {
+    //                 "codebuild:BatchGetBuilds"
+    //                 "codebuild:StartBuild"
+    //               }
+    //               Resource = new Listing {
+    //                 "*" // todo: more restricted?
+    //               }
+    //             }
+    //             new {
+    //               Effect = "Allow"
+    //               Action = new Listing {
+    //                 "codestar-connections:UseConnection"
+    //               }
+    //               Resource = new Listing {
+    //                 cfn.Ref("GitHubConnection")
+    //               }
+    //             }
+    //             new {
+    //               Effect = "Allow"
+    //               Action = new Listing {
+    //                 "ecs:*" // todo: more restricted?
+    //                 "ecr:*" // todo: more restricted?
+    //               }
+    //               Resource = new Listing {
+    //                 "*" // todo: more restricted?
+    //               }
+    //             }
+    //             new {
+    //               Resource = "*"
+    //               Effect = "Allow"
+    //               Action = new Listing {
+    //                 "iam:PassRole"
+    //               }
+    //               Condition {
+    //                 StringLike = new Mapping {
+    //                   ["iam:PassedToService"] = new Listing {
+    //                     "ecs-tasks.amazonaws.com"
+    //                   }
+    //                 }
+    //               }
+    //             }
+    //           }
+    //         }
+    //       }
+    //     }
+  }
+
+  ["GitHubConnection"] = new codestarconnectionsConnection.Connection {
+    ConnectionName = cfn.Sub("${AWS::StackName}-GitHubConnection")
+    ProviderType = "GitHub"
+  }
+
+  ["CodePipeline"] = new codepipelinePipeline.Pipeline {
+    RoleArn = cfn.GetAtt("CodePipelineRole", "Arn")
+    ArtifactStore = new {
+      Type = "S3"
+      Location = cfn.Ref("ArtifactBucket")
+    }
+    Stages {
+      new {
+        Name = "Source"
+        Actions {
+          new {
+            Name = "SourceAction"
+            ActionTypeId {
+              Category = "Source"
+              Owner = "AWS"
+              Version = "1"
+              Provider = "CodeStarSourceConnection"
+            }
+            OutputArtifacts {
+              new {
+                Name = "SourceOutput"
+              }
+            }
+            Configuration {
+              ConnectionArn = cfn.Ref("GitHubConnection")
+              FullRepositoryId = "jamesward/hello-lambda-python" // todo: externalize
+              BranchName = "main" // todo: externalize
+            }
+          }
+        }
+      }
+      new {
+        Name = "Deploy"
+        Actions {
+          new {
+            Name = "DeployAction"
+            ActionTypeId {
+              Category = "Invoke"
+              Owner = "AWS"
+              Provider = "Lambda"
+              Version = "1"
+            }
+            InputArtifacts {
+              new {
+                Name = "SourceOutput"
+              }
+            }
+            Configuration {
+              FunctionName = cfn.Ref("Function")
+            }
+          }
+        }
+      }
+    }
+  }
+
+}
